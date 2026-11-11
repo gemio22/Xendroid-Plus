@@ -16,18 +16,15 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Install Vulkan & SPIR-V Tools
+      - name: Install Vulkan & SPIR-V Shader Tools
         run: |
           sudo apt-get update
           sudo apt-get install -y glslang-tools spirv-tools python3
 
-      - name: Setup Android SDK, NDK and CMake
-        uses: android-actions/setup-android@v3
-
-      - name: Accept Licenses & Install Components
+      - name: Accept Licenses & Install NDK and CMake
         run: |
-          yes | sdkmanager --licenses || true
-          sdkmanager "platforms;android-35" "ndk;29.0.14206865" "cmake;3.30.3"
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "platforms;android-35" "ndk;29.0.14206865" "cmake;3.30.3"
 
       - name: Configure local.properties
         run: |
@@ -35,7 +32,7 @@ jobs:
           echo "cmake.dir=$ANDROID_HOME/cmake/3.30.3" >> local.properties
           chmod +x gradlew
 
-      - name: Build APK
+      - name: Build Debug APK
         run: ./gradlew :app:assembleDebug --no-daemon
 
       - name: Upload APK
