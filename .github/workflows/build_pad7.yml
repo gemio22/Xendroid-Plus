@@ -1,0 +1,40 @@
+name: Build Xiaomi Pad 7 Optimized APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Install Vulkan & SPIR-V Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y glslang-tools spirv-tools python3
+
+      - name: Setup Android SDK, NDK and CMake
+        uses: android-actions/setup-android@v3
+      - name: Install Android Components
+        run: |
+          sdkmanager "platforms;android-35" "ndk;29.0.14206865" "cmake;3.30.3"
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build Optimized Release APK
+        run: ./gradlew :app:assembleRelease --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: XenDroid-Pad7-Optimized
+          path: app/build/outputs/apk/release/*.apk
