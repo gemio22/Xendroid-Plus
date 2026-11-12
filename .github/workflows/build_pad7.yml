@@ -4,39 +4,134 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  build-pad7:
     runs-on: ubuntu-24.04
+
     steps:
-      - name: Checkout repository
+      - name: Checkout Código-Fonte
         uses: actions/checkout@v4
 
-      - name: Set up JDK 21
+      - name: Configurar Java JDK 21
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Install Vulkan & SPIR-V Shader Tools
+      - name: Cache do Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Instalar Dependências Vulkan, SPIR-V e Build
         run: |
           sudo apt-get update
-          sudo apt-get install -y glslang-tools spirv-tools python3
+          sudo apt-get install -y glslang-tools spirv-tools python3 ninja-build
 
-      - name: Accept Licenses & Install NDK and CMake
+      - name: Configurar Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Instalar Plataformas, Build-Tools e NDK r29
         run: |
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
-          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "platforms;android-35" "ndk;29.0.14206865" "cmake;3.30.3"
+          sdkmanager \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "ndk;29.0.14206865" \
+            "cmake;3.30.3"
 
-      - name: Configure local.properties
+      - name: Injetar Otimizações ARMv9.2 e ThinLTO (Snapdragon 7+ Gen 3)
+        shell: bash
         run: |
-          echo "sdk.dir=$ANDROID_HOME" > local.properties
-          echo "cmake.dir=$ANDROID_HOME/cmake/3.30.3" >> local.properties
-          chmod +x gradlew
+          set -euo pipefail
+          CMAKE_FILE="emulator-core/src/main/cpp/CMakeLists.txt"
 
-      - name: Build Debug APK
-        run: ./gradlew :app:assembleDebug --no-daemon
+          # Falha imediatamente se o arquivo ou o alvo 'e' não existirem
+          test -f "$CMAKE_FILE"
+          grep -qE "(add_library|target_compile_options)\s*\(\s*e\b" "$CMAKE_FILE"
 
-      - name: Upload APK
+          # Anexa ao FINAL do CMakeLists.txt para não ser sobrescrito pelo -O2 padrão do NDK
+          cat << 'EOF' >> "$CMAKE_FILE"
+
+          # --- Otimizações específicas para Xiaomi Pad 7 (Snapdragon 7+ Gen 3 / ARMv9.2) ---
+          target_compile_options(e PRIVATE
+              -O3
+              -flto=thin
+              -march=armv9.2-a+fp16+dotprod+i8mm+bf16
+              -mtune=cortex-x4
+              -fno-math-errno
+              -fno-trapping-math
+          )
+          target_link_options(e PRIVATE
+              -flto=thin
+              -Wl,--lto-O3
+              -Wl,--gc-sections
+          )
+          EOF
+
+          echo "Flags injetadas com sucesso. Últimas linhas do CMakeLists.txt:"
+          tail -n 20 "$CMAKE_FILE"
+
+      - name: Dar Permissão de Execução ao Gradle
+        run: chmod +x gradlew
+
+      - name: Compilar APK Release Exclusivo para ARM64
+        run: |
+          ./gradlew :app:assembleRelease \
+            -Pandroid.injected.invoked.from.ide=true \
+            -Pandroid.injected.build.abi=arm64-v8a \
+            --no-daemon
+
+      - name: Validar Binário Nativo e Assinar APK para HyperOS
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
+          READELF="$ANDROID_HOME/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          APK_DIR="app/build/outputs/apk/release"
+
+          # 1. Valida se o .so nativo foi compilado para AArch64 (ARM64)
+          RAW_APK=$(find "$APK_DIR" -name "*.apk" | head -n 1)
+          test -n "$RAW_APK"
+          mkdir -p /tmp/apk_check
+          unzip -q "$RAW_APK" "lib/arm64-v8a/*.so" -d /tmp/apk_check
+          for so in /tmp/apk_check/lib/arm64-v8a/*.so; do
+            echo "Verificando arquitetura de: $so"
+            "$READELF" -h "$so" | grep -E "Class:|Machine:"
+          done
+
+          # 2. Se o APK gerado não estiver assinado, alinha e assina para permitir instalação no Xiaomi Pad 7
+          if [[ "$RAW_APK" == *-unsigned.apk ]]; then
+            echo "APK sem assinatura detectado. Gerando assinatura para instalação..."
+            keytool -genkeypair -v \
+              -keystore /tmp/pad7-release.keystore \
+              -alias pad7key \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass android -keypass android \
+              -dname "CN=XenDroid-Pad7,O=CustomBuild,C=BR"
+
+            ALIGNED_APK="/tmp/aligned.apk"
+            FINAL_APK="$APK_DIR/XenDroid-Plus-XiaomiPad7-arm64-signed.apk"
+
+            "$BUILD_TOOLS/zipalign" -p -f 4 "$RAW_APK" "$ALIGNED_APK"
+            "$BUILD_TOOLS/apksigner" sign \
+              --ks /tmp/pad7-release.keystore \
+              --ks-key-alias pad7key \
+              --ks-pass pass:android \
+              --key-pass pass:android \
+              --out "$FINAL_APK" \
+              "$ALIGNED_APK"
+
+            rm -f "$RAW_APK"
+            "$BUILD_TOOLS/apksigner" verify --verbose "$FINAL_APK"
+          fi
+
+      - name: Disponibilizar APK Otimizado para Download
         uses: actions/upload-artifact@v4
         with:
-          name: XenDroid-Pad7-Optimized
-          path: app/build/outputs/apk/debug/*.apk
+          name: XenDroid-Plus-XiaomiPad7-ARMv9-Optimized
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
